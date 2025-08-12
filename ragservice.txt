@@ -1,0 +1,113 @@
+// services/ragService.js
+const xlsx = require('xlsx');
+const { MemoryVectorStore } = require("langchain/vectorstores/memory");
+const { Document } = require("langchain/document");
+const { ChatPromptTemplate } = require("@langchain/core/prompts");
+const { createStuffDocumentsChain } = require("langchain/chains/combine_documents");
+const { createRetrievalChain } = require("langchain/chains/retrieval");
+
+const { OllamaEmbeddings } = require("@langchain/community/embeddings/ollama");
+const { ChatGroq } = require("@langchain/groq");
+
+let vectorStore;
+
+const promptTemplate = ChatPromptTemplate.fromMessages([
+    ["system", 
+        "You are an expert on the company's monthly calendar and reference links. " +
+        "You will be provided with context from the calendar in a structured format. " +
+        "Your task is to answer the user's question accurately and concisely based ONLY on this context.\n\n" +
+        "Before giving an answer, check to ensure that the 'Date' in the context is a perfect match for the date in the user's question, even if the formats are different (e.g., '16th August' should match '8/16/25'). " +
+        "If a 'Reference Link' is present, you MUST provide the full URL in your answer. " +
+        "If the answer cannot be found or the dates do not match, politely state that the information is not available and do not make anything up.\n\n" +
+        "Context:\n" +
+        "{context}"
+    ],
+    ["user", "{input}"]
+]);
+
+const processExcelFile = async (fileBuffer) => {
+    const workbook = xlsx.read(fileBuffer, { type: 'buffer', cellDates: true });
+    let documents = [];
+
+    for (const sheetName of workbook.SheetNames) {
+        const worksheet = workbook.Sheets[sheetName];
+        
+        // Use sheet_to_json with defval to ensure all rows are captured
+        const jsonData = xlsx.utils.sheet_to_json(worksheet, { 
+            header: 1, 
+            raw: false, 
+            defval: '' 
+        });
+
+        // Get header row dynamically from the processed JSON data
+        if (jsonData.length === 0) continue;
+        const headerRow = Object.keys(jsonData[0]);
+        
+        for (const row of jsonData) {
+            let metadata = {};
+            let pageContentParts = [];
+            let rowHasData = false;
+
+            for (const header of headerRow) {
+                const value = row[header];
+
+                if (value !== '') {
+                    rowHasData = true;
+                }
+                metadata[header] = value;
+                pageContentParts.push(`${header}: ${value}`);
+            }
+            
+            if (rowHasData) {
+                const pageContent = pageContentParts.join(' | ');
+                documents.push(new Document({
+                    pageContent: pageContent,
+                    metadata: metadata 
+                }));
+            }
+        }
+    }
+
+     // --- MODIFICATION: Add the log to check the number of documents ---
+    console.log(`Successfully created ${documents.length} documents from the Excel file.`);
+
+    const embeddings = new OllamaEmbeddings({
+        model: "nomic-embed-text",
+        baseUrl: "http://localhost:11434"
+    });
+    
+    vectorStore = await MemoryVectorStore.fromDocuments(documents, embeddings);
+};
+
+const getAnswer = async (query) => {
+    if (!vectorStore) {
+        return null;
+    }
+
+    const model = new ChatGroq({
+        model: "llama3-8b-8192",
+        temperature: 0.1,
+        apiKey: process.env.GROQ_API_KEY,
+    });
+    
+    const retriever = vectorStore.asRetriever({ k: 100 });
+
+    const combineDocsChain = await createStuffDocumentsChain({
+        llm: model,
+        prompt: promptTemplate,
+    });
+
+    const retrievalChain = await createRetrievalChain({
+        retriever,
+        combineDocsChain,
+    });
+    
+    const result = await retrievalChain.invoke({ input: query });
+
+    return result.answer;
+};
+
+module.exports = {
+    processExcelFile,
+    getAnswer
+};
