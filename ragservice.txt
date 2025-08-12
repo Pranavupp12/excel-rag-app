@@ -16,8 +16,9 @@ const promptTemplate = ChatPromptTemplate.fromMessages([
         "You are an expert on the company's monthly calendar and reference links. " +
         "You will be provided with context from the calendar in a structured format. " +
         "Your task is to answer the user's question accurately and concisely based ONLY on this context.\n\n" +
-        "Before giving an answer, check to ensure that the 'Date' in the context is a perfect match for the date in the user's question, even if the formats are different (e.g., '16th August' should match '8/16/25'). " +
+        "Before giving an answer, you MUST verify that the 'Date' in the context is a exact and perfect match for the date in the user's question, even if the formats are different (e.g., 'august 16th' should match '8/16/25'). " +
         "If a 'Reference Link' is present, you MUST provide the full URL in your answer. " +
+        "If any header as has empty value you dont have to fill in on our own just simply give empty value "+
         "If the answer cannot be found or the dates do not match, politely state that the information is not available and do not make anything up.\n\n" +
         "Context:\n" +
         "{context}"
@@ -79,10 +80,111 @@ const processExcelFile = async (fileBuffer) => {
     vectorStore = await MemoryVectorStore.fromDocuments(documents, embeddings);
 };
 
+
+
+
+// Date normalization function to convert various date formats to MM/DD/YYYY
+const normalizeDateInQuery = (query) => {
+    // Define regex patterns for different date formats
+    const datePatterns = [
+        // Month names (full and abbreviated) with day and year
+        {
+            pattern: /\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4}|\d{2})\b/gi,
+            handler: (match, month, day, year) => {
+                const monthMap = {
+                    'january': '01', 'jan': '01',
+                    'february': '02', 'feb': '02',
+                    'march': '03', 'mar': '03',
+                    'april': '04', 'apr': '04',
+                    'may': '05',
+                    'june': '06', 'jun': '06',
+                    'july': '07', 'jul': '07',
+                    'august': '08', 'aug': '08',
+                    'september': '09', 'sep': '09',
+                    'october': '10', 'oct': '10',
+                    'november': '11', 'nov': '11',
+                    'december': '12', 'dec': '12'
+                };
+                const normalizedMonth = monthMap[month.toLowerCase()];
+                const normalizedDay = day.padStart(2, '0');
+                const normalizedYear = year.length === 2 ? `20${year}` : year;
+                return `${normalizedMonth}/${normalizedDay}/${normalizedYear}`;
+            }
+        },
+        // DD/MM/YYYY or DD-MM-YYYY format
+        {
+            pattern: /\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\b/g,
+            handler: (match, first, second, year) => {
+                // Assume MM/DD/YYYY format (US standard)
+                const month = first.padStart(2, '0');
+                const day = second.padStart(2, '0');
+                return `${month}/${day}/${year}`;
+            }
+        },
+        // YYYY-MM-DD format (ISO)
+        {
+            pattern: /\b(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})\b/g,
+            handler: (match, year, month, day) => {
+                const normalizedMonth = month.padStart(2, '0');
+                const normalizedDay = day.padStart(2, '0');
+                return `${normalizedMonth}/${normalizedDay}/${year}`;
+            }
+        },
+        // Month DD format (current year assumed)
+        {
+            pattern: /\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?\b/gi,
+            handler: (match, month, day) => {
+                const monthMap = {
+                    'january': '01', 'jan': '01',
+                    'february': '02', 'feb': '02',
+                    'march': '03', 'mar': '03',
+                    'april': '04', 'apr': '04',
+                    'may': '05',
+                    'june': '06', 'jun': '06',
+                    'july': '07', 'jul': '07',
+                    'august': '08', 'aug': '08',
+                    'september': '09', 'sep': '09',
+                    'october': '10', 'oct': '10',
+                    'november': '11', 'nov': '11',
+                    'december': '12', 'dec': '12'
+                };
+                const normalizedMonth = monthMap[month.toLowerCase()];
+                const normalizedDay = day.padStart(2, '0');
+                const currentYear = new Date().getFullYear();
+                return `${normalizedMonth}/${normalizedDay}/${currentYear}`;
+            }
+        },
+        // MM/DD format (current year assumed)
+        {
+            pattern: /\b(\d{1,2})[\/\-](\d{1,2})\b/g,
+            handler: (match, month, day) => {
+                const normalizedMonth = month.padStart(2, '0');
+                const normalizedDay = day.padStart(2, '0');
+                const currentYear = new Date().getFullYear();
+                return `${normalizedMonth}/${normalizedDay}/${currentYear}`;
+            }
+        }
+    ];
+
+    let normalizedQuery = query;
+
+    // Apply each pattern to normalize dates
+    datePatterns.forEach(({ pattern, handler }) => {
+        normalizedQuery = normalizedQuery.replace(pattern, handler);
+    });
+
+    return normalizedQuery;
+};
+
+
+
 const getAnswer = async (query) => {
     if (!vectorStore) {
         return null;
     }
+
+        // --- MISSING PART: Call the date normalization function
+    const preprocessedQuery = normalizeDateInQuery(query);
 
     const model = new ChatGroq({
         model: "llama3-8b-8192",
@@ -90,7 +192,7 @@ const getAnswer = async (query) => {
         apiKey: process.env.GROQ_API_KEY,
     });
     
-    const retriever = vectorStore.asRetriever({ k: 100 });
+    const retriever = vectorStore.asRetriever({ k: 50 });
 
     const combineDocsChain = await createStuffDocumentsChain({
         llm: model,
@@ -102,7 +204,8 @@ const getAnswer = async (query) => {
         combineDocsChain,
     });
     
-    const result = await retrievalChain.invoke({ input: query });
+    // Use the preprocessed query for the retrieval and answer generation
+    const result = await retrievalChain.invoke({ input: preprocessedQuery });
 
     return result.answer;
 };
