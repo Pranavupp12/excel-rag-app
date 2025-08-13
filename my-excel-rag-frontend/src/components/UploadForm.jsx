@@ -45,6 +45,10 @@ const UploadForm = ({ onFileRead, setLoading }) => {
     const formData = new FormData();
     formData.append('file', file); // Directly append the original File object
 
+    console.log("📤 Uploading to:", `${BACKEND_URL}/upload`);
+    console.log("📄 File selected:", file);
+
+
     try {
       console.log('Uploading file:', file);
       const response = await axios.post(`${BACKEND_URL}/upload`, formData, {

@@ -13,31 +13,35 @@ const { ChatGroq } = require("@langchain/groq");
 
 let vectorStore;
 
-//first llm for extracting and providiing the answer
+//first llm for extracting and providing the answer
 // This prompt is designed to extract relevant information from the calendar context
 const promptTemplate = ChatPromptTemplate.fromMessages([
-    ["system", 
+    ["system",
         "You are an expert on the company's monthly calendar and reference links. " +
         "You will be provided with context from the calendar in a structured format. " +
         "Your task is to answer the user's question accurately and concisely based ONLY on this context.\n\n" +
-        "Before giving an answer, you MUST verify that the 'Date' in the context is a exact and perfect match for the date in the user's question, even if the formats are different (e.g., 'august 16th' should match '8/16/25'). " +
+        "Before giving an answer, you MUST verify that the 'Date' in the context is an exact and perfect match for the date in the user's question, even if the formats are different (e.g., 'august 16th' should match '8/16/25'). " +
+        "If user asks information or summary for the date, provide all headers and their corresponding value"+
+        "If you asks for a specific header value only provide that header name and value"+
+        "For example if 'Remark: ' or any other header is the empty state value not found , do not fill the empty header with any other value , take this instruction very seriously "+
         "If a 'Reference Link' is present, you MUST provide the full URL in your answer. " +
-        "If any header as has empty value you dont have to fill in on our own just simply give empty value "+
         "If the answer cannot be found or the dates do not match, politely state that the information is not available and do not make anything up.\n\n" +
         "Context:\n" +
         "{context}"
     ],
     ["user", "{input}"]
 ]);
-//second ll for formatting the answer
-// This prompt is designed to take the original answer and format it into a more human-readable structure
+//second llm for formatting the answer
+// This prompt is designed to take the first answer and  original query from first llm and format it into a more human-readable structure
 const humanizePromptTemplate = ChatPromptTemplate.fromMessages([
-    ["system", 
-        "You are a helpful assistant. Your task is to take the provided calendar information, which may contain multiple entries, and extract ONLY the first entry. You must then format this information as a single, cohesive block of text. Start the output with the Date and Day from the context on a single line. Then, create a bulleted list for all other headers and their corresponding information. Do not add any extra headers or conversational text. Use only the information provided in the context.\n\n" +
+    ["system",
+        "You are a helpful assistant. Your task is to format the 'Original Answer' provided below into a single block of text." +
+        "Start the output with the 'Date' and 'Day' from the context on a single line. Then, create a bulleted list for all other headers and their corresponding values. If a header has no value, state 'No value found'." +
+        "Do not add any extra headers or conversational text. Use only the information provided in the context." +
         "Original Answer:\n" +
         "{original_answer}"
     ],
-    ["user", "Please provide the information for the first date."]
+    ["user", "Please format the information."]
 ]);
 
 const processExcelFile = async (fileBuffer) => {
@@ -47,24 +51,27 @@ const processExcelFile = async (fileBuffer) => {
     for (const sheetName of workbook.SheetNames) {
         const worksheet = workbook.Sheets[sheetName];
         
-        // Use sheet_to_json with defval to ensure all rows are captured
+        // Read the worksheet as an array of arrays
         const jsonData = xlsx.utils.sheet_to_json(worksheet, { 
             header: 1, 
             raw: false, 
             defval: '' 
         });
 
-        // Get header row dynamically from the processed JSON data
+        // Get the header row and the data rows
         if (jsonData.length === 0) continue;
-        const headerRow = Object.keys(jsonData[0]);
+        const headers = jsonData[0];
+        const dataRows = jsonData.slice(1);
         
-        for (const row of jsonData) {
+        for (const row of dataRows) {
             let metadata = {};
             let pageContentParts = [];
             let rowHasData = false;
 
-            for (const header of headerRow) {
-                const value = row[header];
+            // Map headers to row values
+            for (let i = 0; i < headers.length; i++) {
+                const header = headers[i];
+                const value = row[i] || ''; // Use empty string for undefined values
 
                 if (value !== '') {
                     rowHasData = true;
@@ -73,12 +80,17 @@ const processExcelFile = async (fileBuffer) => {
                 pageContentParts.push(`${header}: ${value}`);
             }
             
-            if (rowHasData) {
+          if (rowHasData) {
                 const pageContent = pageContentParts.join(' | ');
-                documents.push(new Document({
+                const newDocument = new Document({
                     pageContent: pageContent,
-                    metadata: metadata 
-                }));
+                    metadata: metadata
+                });
+                documents.push(newDocument);
+
+                console.log('--- Document Created ---');
+                console.log('Page Content:', newDocument.pageContent);
+                console.log('Metadata:', newDocument.metadata);
             }
         }
     }
@@ -221,6 +233,11 @@ const getAnswer = async (query) => {
     // --- STEP 1: Get the full, unfiltered answer from the first chain ---
     const firstResult = await retrievalChain.invoke({ input: preprocessedQuery });
 
+     // --- ADDED: Console log the raw answer from the first LLM ---
+    console.log('--- Answer from First LLM ---');
+    console.log(firstResult.answer);
+    console.log('------------------------------');
+
   // Step 2: Create a second prompt and chain
     const humanizeChain = RunnableSequence.from([
         humanizePromptTemplate,
@@ -231,6 +248,7 @@ const getAnswer = async (query) => {
     // Step 3: Pass the first answer directly to the second chain
     const finalAnswer = await humanizeChain.invoke({
         original_answer: firstResult.answer,
+        //original_query: query,
     });
 
     return finalAnswer;
